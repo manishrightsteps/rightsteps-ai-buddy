@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import formidable from 'formidable';
-import fs from 'fs';
-import path from 'path';
+import { chunkDocument } from '@/lib/chunking';
+import { upsertChunks } from '@/lib/pinecone';
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
@@ -31,17 +30,26 @@ export async function POST(request) {
       }, { status: 400 });
     }
 
-    // Process with Gemini
+    // Chunk the document
+    const chunks = chunkDocument(fileContent, 1000, 200);
+
+    // Store chunks in Pinecone
+    const vectorCount = await upsertChunks(chunks, file.name);
+
+    // Generate initial analysis using first few chunks
     const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
 
-    const prompt = `Please read and analyze this document. Provide a comprehensive summary including:
-    1. Main topics covered
-    2. Key points and insights
-    3. Important details
-    4. Overall structure and organization
+    const firstChunks = chunks.slice(0, 3).map(chunk => chunk.text).join('\n\n');
+    const prompt = `Please provide a brief overview of this document based on the following content:
 
-    Document content:
-    ${fileContent}`;
+    ${firstChunks}
+
+    Provide:
+    1. Main topic and purpose
+    2. Key themes
+    3. Document type and structure
+
+    Keep the analysis concise since this is just an initial overview.`;
 
     const result = await model.generateContent(prompt);
     const response = await result.response;
@@ -52,7 +60,9 @@ export async function POST(request) {
       fileName: file.name,
       fileSize: file.size,
       analysis: analysis,
-      originalContent: fileContent
+      chunksStored: vectorCount,
+      totalChunks: chunks.length,
+      ragEnabled: true
     });
 
   } catch (error) {

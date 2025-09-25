@@ -1,32 +1,45 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import { searchSimilarChunks } from '@/lib/pinecone';
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 export async function POST(request) {
   try {
-    const { content, question } = await request.json();
+    const { question, fileName } = await request.json();
 
-    if (!content) {
-      return NextResponse.json({ error: 'No content provided' }, { status: 400 });
+    if (!question) {
+      return NextResponse.json({ error: 'No question provided' }, { status: 400 });
     }
+
+    // Search for relevant chunks using RAG
+    const relevantChunks = await searchSimilarChunks(question, 3);
+
+    if (relevantChunks.length === 0) {
+      return NextResponse.json({
+        error: 'No relevant content found. Please upload a document first.'
+      }, { status: 404 });
+    }
+
+    // Prepare context from retrieved chunks
+    const context = relevantChunks
+      .map((chunk, index) => `[Chunk ${index + 1}]\n${chunk.text}`)
+      .join('\n\n---\n\n');
 
     const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
 
-    let prompt;
-    if (question) {
-      prompt = `Based on this document, please answer the following question: "${question}"
+    const prompt = `Based on the following relevant sections from the document, please answer the question: "${question}"
 
-      Document content:
-      ${content}
+    Context from document:
+    ${context}
 
-      Please provide a clear, concise answer based on the information in the document.`;
-    } else {
-      prompt = `Please provide a detailed explanation of this document. Make it conversational and easy to understand, as if you're explaining it to someone who hasn't read it yet.
+    Instructions:
+    - Provide a clear, detailed answer based only on the information provided above
+    - If the context doesn't contain enough information to answer the question, say so
+    - Make your response conversational and easy to understand
+    - Reference specific details from the context when relevant
 
-      Document content:
-      ${content}`;
-    }
+    Question: ${question}`;
 
     const result = await model.generateContent(prompt);
     const response = await result.response;
@@ -35,7 +48,13 @@ export async function POST(request) {
     return NextResponse.json({
       success: true,
       explanation: explanation,
-      isQuestion: !!question
+      isQuestion: true,
+      sourcesUsed: relevantChunks.length,
+      sources: relevantChunks.map(chunk => ({
+        fileName: chunk.fileName,
+        chunkIndex: chunk.chunkIndex,
+        similarity: Math.round(chunk.score * 100) / 100
+      }))
     });
 
   } catch (error) {
